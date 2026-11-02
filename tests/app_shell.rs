@@ -111,7 +111,10 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
             ));
         }
 
-        let destination = arguments.last().expect("at least two arguments");
+        let destination = arguments
+            .last()
+            .expect("at least two arguments")
+            .trim_start_matches("./");
         if destination != "dist" && !destination.starts_with("dist/") {
             continue;
         }
@@ -362,6 +365,18 @@ fn bare_dist_destination_is_joined_with_the_source_filename() {
 #[test]
 fn quoted_release_destinations_are_unquoted_before_checking() {
     let build_script = r#"cp web/icons/icon-192.png "dist/extra-icon.png""#;
+    let service_worker = "const APP_SHELL = [\n  \"./index.html\",\n];";
+
+    let error = check_app_shell(build_script, service_worker).unwrap_err();
+    assert!(
+        error.contains("not cached by the service worker: extra-icon.png"),
+        "{error}"
+    );
+}
+
+#[test]
+fn dot_prefixed_dist_destinations_are_normalized_before_filtering() {
+    let build_script = "cp web/index.html dist/\ncp web/icons/icon-192.png ./dist/extra-icon.png";
     let service_worker = "const APP_SHELL = [\n  \"./index.html\",\n];";
 
     let error = check_app_shell(build_script, service_worker).unwrap_err();
