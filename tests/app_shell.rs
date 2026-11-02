@@ -302,8 +302,30 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
             line.split_whitespace().nth(1).unwrap_or_default()
         };
 
-        if !matches!(command, "cd" | "mkdir" | "rm" | "cp") {
+        if line.is_empty() {
             continue;
+        }
+
+        if !matches!(command, "cd" | "mkdir" | "rm" | "cp") {
+            let known_non_output_line = matches!(
+                line,
+                "set -euo pipefail"
+                    | r#"ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)""#
+                    | "wasm-pack build \\"
+                    | "--release \\"
+                    | "--target web \\"
+                    | "--out-dir web/pkg \\"
+                    | "--out-name rustbound_idle"
+                    | r#"printf '\nBuilt static site in %s/dist\n' "$ROOT_DIR""#
+                    | r#"printf 'wasm size: %s bytes\n' "$(wc -c < dist/pkg/rustbound_idle_bg.wasm)""#
+            );
+            if known_non_output_line {
+                continue;
+            }
+
+            return Err(format!(
+                "unsupported build command on scripts/build.sh line {line_number}: {first_word}"
+            ));
         }
 
         let arguments = shell_words(line).map_err(|error| {
@@ -321,6 +343,11 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
             }
 
             let directory = &arguments[1];
+            if directory == "-" {
+                return Err(format!(
+                    "cd command on scripts/build.sh line {line_number} uses cd -, which cannot be checked safely"
+                ));
+            }
             if directory == "$ROOT_DIR" {
                 current_directory.clear();
                 continue;
