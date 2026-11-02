@@ -11,6 +11,11 @@ fn normalize_shell_path(path: &str) -> Result<Option<String>, String> {
     }
 
     let path = path.strip_prefix("./").unwrap_or(path);
+    if path.contains('#') {
+        return Err(format!(
+            "APP_SHELL entry contains a URL fragment instead of a file path: {path}"
+        ));
+    }
     if path.contains('\\') {
         return Err(format!(
             "APP_SHELL entry contains a backslash instead of a URL path separator: {path}"
@@ -23,6 +28,29 @@ fn normalize_shell_path(path: &str) -> Result<Option<String>, String> {
     }
 
     Ok(Some(path.to_owned()))
+}
+
+fn normalize_source_path(path: &str) -> String {
+    let is_absolute = path.starts_with('/');
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." if components.last().is_some_and(|last| *last != "..") => {
+                let _ = components.pop();
+            }
+            ".." if !is_absolute => components.push(component),
+            ".." => {}
+            _ => components.push(component),
+        }
+    }
+
+    let normalized = components.join("/");
+    if is_absolute {
+        format!("/{normalized}")
+    } else {
+        normalized
+    }
 }
 
 fn app_shell_assets(source: &str) -> Result<BTreeSet<String>, String> {
@@ -143,7 +171,7 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
         let destination_is_directory =
             sources.len() > 1 || destination == "dist" || destination.ends_with('/');
         for source in sources {
-            if *source == SERVICE_WORKER_SOURCE {
+            if normalize_source_path(source) == SERVICE_WORKER_SOURCE {
                 // A service worker is installed by the browser and does not precache itself.
                 continue;
             }
@@ -364,6 +392,27 @@ fn duplicate_root_urls_are_rejected() {
     ] {
         let error = app_shell_assets(service_worker).unwrap_err();
         assert!(error.contains("root URL more than once"), "{error}");
+    }
+}
+
+#[test]
+fn app_shell_paths_with_url_fragments_are_rejected() {
+    let error =
+        app_shell_assets("const APP_SHELL = [\n  \"./index.html\",\n  \"./extra#icon.png\",\n];")
+            .unwrap_err();
+
+    assert!(error.contains("URL fragment"), "{error}");
+}
+
+#[test]
+fn dot_segments_are_normalized_before_exempting_the_service_worker() {
+    let service_worker = "const APP_SHELL = [\n  \"./index.html\",\n];";
+    for source in ["./web/sw.js", "././web/sw.js", "web/./sw.js"] {
+        let build_script = format!("cp web/index.html dist/\ncp {source} dist/");
+        assert!(
+            check_app_shell(&build_script, service_worker).is_ok(),
+            "service-worker source {source:?} should not be added to the cache list"
+        );
     }
 }
 
