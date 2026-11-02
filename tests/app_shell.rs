@@ -22,7 +22,7 @@ fn normalize_shell_path(path: &str) -> Result<Option<String>, String> {
         ));
     }
 
-    Ok(Some(path.replace('\\', "/")))
+    Ok(Some(path.to_owned()))
 }
 
 fn app_shell_assets(source: &str) -> Result<BTreeSet<String>, String> {
@@ -144,13 +144,19 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
                 destination.to_owned()
             };
 
+            if output.contains('\\') {
+                return Err(format!(
+                    "release output path contains a backslash: {output}"
+                ));
+            }
+
             let relative = output
                 .strip_prefix("dist/")
                 .ok_or_else(|| format!("build output {output} is not inside the dist directory"))?;
             if relative.is_empty() || relative.split('/').any(|part| part == "..") {
                 return Err(format!("invalid release output path: {output}"));
             }
-            assets.insert(relative.replace('\\', "/"));
+            assets.insert(relative.to_owned());
         }
     }
 
@@ -251,6 +257,11 @@ fn shell_words(line: &str) -> Result<Vec<String>, String> {
                         words.push(std::mem::take(&mut word));
                         started = false;
                     }
+                }
+                ';' | '&' | '|' | '<' | '>' => {
+                    return Err(format!(
+                        "unquoted shell control operator {character:?} cannot be checked safely"
+                    ));
                 }
                 _ => {
                     word.push(character);
@@ -367,6 +378,26 @@ fn quoted_release_destinations_are_unquoted_before_checking() {
 fn cp_target_directory_options_are_rejected_before_destination_filtering() {
     let error = release_assets("cp -t dist web/icons/icon-192.png").unwrap_err();
     assert!(error.contains("unsupported cp options"), "{error}");
+}
+
+#[test]
+fn release_output_paths_with_backslashes_are_rejected() {
+    let error =
+        release_assets(r#"cp web/icons/icon-192.png 'dist/icons\icon-192.png'"#).unwrap_err();
+    assert!(
+        error.contains("release output path contains a backslash"),
+        "{error}"
+    );
+}
+
+#[test]
+fn unquoted_shell_control_operators_are_rejected() {
+    for operator in [";", "&&", "||", "|", ">", "<", "&"] {
+        let build_script =
+            format!("cp web/icons/icon-192.png dist/extra-icon.png {operator} echo done");
+        let error = release_assets(&build_script).unwrap_err();
+        assert!(error.contains("unquoted shell control operator"), "{error}");
+    }
 }
 
 #[test]
