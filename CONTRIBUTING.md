@@ -3,9 +3,16 @@
 Thank you for being here. You do not need to write Rust to contribute. Ideas, testing,
 documentation, design, accessibility feedback, and welcoming other contributors all count.
 
+Rustbound Idle is the companion project to the
+[Rustbound series](https://journeytocode.io/series/rustbound-build-your-first-rust-app/),
+which builds this codebase from scratch, one article at a time. You do not have to read it
+before contributing, but it is the fastest way to understand *why* the code looks the way it
+does, and the larger issues assume you have.
+
 ## Where to start
 
 - Have an idea or question? Open a [Discussion](https://github.com/journey-to-code-org/rustbound-idle/discussions).
+  Half-formed is fine. That is what Discussions are for.
 - Found a bug? Use the bug-report issue form.
 - Want something small? Look for the [`good first issue`](https://github.com/journey-to-code-org/rustbound-idle/labels/good%20first%20issue) label.
 - Stuck? Ask publicly in the issue or Discussion. Your question may help the next person.
@@ -69,5 +76,24 @@ npm run check:offline
 Small is welcome. One test, one CSS fix, or one clarified sentence is a real contribution.
 Explain what changed, why it helps, and how you checked it. Review may ask for changes; that is a normal
 part of making the project better together.
+
+## Using AI tools
+
+You are welcome to use AI assistants, code generators, or agents while working on Rustbound Idle.
+Two things make that work well for everyone:
+
+**Say so.** Mention in the pull request that a tool helped, and roughly how. This is not a
+confession. It helps reviewers know where to look, and it helps the next contributor calibrate
+what the tool is good at here.
+
+**You are the author.** Commits must be authored by you: your name, your email, your GitHub
+account. If you want to credit the tool, add a `Co-authored-by:` trailer to the commit message.
+A commit authored by a bot or tool account, with a person only opening the pull request, will be
+sent back with a request to re-author it. Most tools have a setting for this; if yours does not,
+`git commit --amend --reset-author` fixes a commit before you push.
+
+This is not a rule about whether you used a tool. It is about who gets credit and who stands behind
+the change. This is a learning project, and the person learning is the one whose name belongs on
+the work.
 
 By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
