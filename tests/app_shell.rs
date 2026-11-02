@@ -100,6 +100,16 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
                 line_number + 1
             ));
         }
+        if operands.iter().any(|operand| {
+            operand
+                .chars()
+                .any(|character| matches!(character, '$' | '`' | '*' | '?' | '[' | ']'))
+        }) {
+            return Err(format!(
+                "copy command on scripts/build.sh line {} uses shell expansion that cannot be checked safely",
+                line_number + 1
+            ));
+        }
 
         let destination = arguments.last().expect("at least two arguments");
         if destination != "dist" && !destination.starts_with("dist/") {
@@ -110,19 +120,6 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
         if sources.is_empty() {
             return Err(format!(
                 "copy command on scripts/build.sh line {} uses unsupported cp options or has no source",
-                line_number + 1
-            ));
-        }
-        if std::iter::once(destination)
-            .chain(sources.iter())
-            .any(|operand| {
-                operand
-                    .chars()
-                    .any(|character| matches!(character, '$' | '`' | '*' | '?' | '[' | ']'))
-            })
-        {
-            return Err(format!(
-                "copy command on scripts/build.sh line {} uses shell expansion that cannot be checked safely",
                 line_number + 1
             ));
         }
@@ -398,6 +395,13 @@ fn unquoted_shell_control_operators_are_rejected() {
         let error = release_assets(&build_script).unwrap_err();
         assert!(error.contains("unquoted shell control operator"), "{error}");
     }
+}
+
+#[test]
+fn dynamic_copy_destinations_are_rejected_before_release_filtering() {
+    let error =
+        release_assets(r#"cp web/icons/icon-192.png "$ROOT_DIR/dist/extra-icon.png""#).unwrap_err();
+    assert!(error.contains("uses shell expansion"), "{error}");
 }
 
 #[test]
