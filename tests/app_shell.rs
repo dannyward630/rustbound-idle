@@ -61,7 +61,12 @@ fn app_shell_assets(source: &str) -> Result<BTreeSet<String>, String> {
                     return Err(format!("APP_SHELL lists {path} more than once"));
                 }
             }
-            None => has_root_url = true,
+            None => {
+                if has_root_url {
+                    return Err("APP_SHELL lists the root URL more than once".to_owned());
+                }
+                has_root_url = true;
+            }
         }
     }
 
@@ -349,6 +354,17 @@ fn missing_or_unshipped_app_shell_files_have_a_useful_error() {
         error.contains("listed in APP_SHELL but not shipped in dist: missing.css"),
         "{error}"
     );
+}
+
+#[test]
+fn duplicate_root_urls_are_rejected() {
+    for service_worker in [
+        "const APP_SHELL = [\n  \"./index.html\",\n  \"./\",\n  \"./\",\n];",
+        "const APP_SHELL = [\n  \"./index.html\",\n  \".\",\n  \"./\",\n];",
+    ] {
+        let error = app_shell_assets(service_worker).unwrap_err();
+        assert!(error.contains("root URL more than once"), "{error}");
+    }
 }
 
 #[test]
