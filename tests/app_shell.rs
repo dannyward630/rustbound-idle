@@ -11,6 +11,11 @@ fn normalize_shell_path(path: &str) -> Result<Option<String>, String> {
     }
 
     let path = path.strip_prefix("./").unwrap_or(path);
+    if path.contains('\\') {
+        return Err(format!(
+            "APP_SHELL entry contains a backslash instead of a URL path separator: {path}"
+        ));
+    }
     if path.starts_with('/') || path.split('/').any(|part| part == ".." || part.is_empty()) {
         return Err(format!(
             "APP_SHELL entry is not a relative file path: {path}"
@@ -68,11 +73,19 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
 
     for (line_number, line) in build_script.lines().enumerate() {
         let line = strip_shell_comment(line).trim();
-        let Some(copy_command) = line.strip_prefix("cp ") else {
+        if !line
+            .strip_prefix("cp")
+            .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
+        {
             continue;
-        };
+        }
 
-        let arguments: Vec<_> = copy_command.split_whitespace().collect();
+        let arguments = shell_words(line).map_err(|error| {
+            format!(
+                "could not parse copy command on scripts/build.sh line {}: {error}",
+                line_number + 1
+            )
+        })?;
         if arguments.len() < 2 {
             return Err(format!(
                 "copy command on scripts/build.sh line {} has no destination",
@@ -80,13 +93,34 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
             ));
         }
 
-        let destination = arguments[arguments.len() - 1];
+        let destination = arguments.last().expect("at least two arguments");
         if destination != "dist" && !destination.starts_with("dist/") {
             continue;
         }
 
+        let sources = &arguments[1..arguments.len() - 1];
+        if sources.is_empty() || sources.iter().any(|source| source.starts_with('-')) {
+            return Err(format!(
+                "copy command on scripts/build.sh line {} uses unsupported cp options or has no source",
+                line_number + 1
+            ));
+        }
+        if std::iter::once(destination)
+            .chain(sources.iter())
+            .any(|operand| {
+                operand
+                    .chars()
+                    .any(|character| matches!(character, '$' | '`' | '*' | '?' | '[' | ']'))
+            })
+        {
+            return Err(format!(
+                "copy command on scripts/build.sh line {} uses shell expansion that cannot be checked safely",
+                line_number + 1
+            ));
+        }
+
         let destination_is_directory = destination == "dist" || destination.ends_with('/');
-        for source in &arguments[..arguments.len() - 1] {
+        for source in sources {
             if *source == SERVICE_WORKER_SOURCE {
                 // A service worker is installed by the browser and does not precache itself.
                 continue;
@@ -156,6 +190,79 @@ fn strip_shell_comment(line: &str) -> &str {
     }
 
     line
+}
+
+fn shell_words(line: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut escaped_in_double_quotes = false;
+    let mut started = false;
+
+    for character in line.chars() {
+        if escaped {
+            if escaped_in_double_quotes && !matches!(character, '$' | '`' | '"' | '\\') {
+                word.push('\\');
+            }
+            word.push(character);
+            escaped = false;
+            escaped_in_double_quotes = false;
+            started = true;
+            continue;
+        }
+
+        match quote {
+            Some('\'') => {
+                if character == '\'' {
+                    quote = None;
+                } else {
+                    word.push(character);
+                }
+            }
+            Some('"') => match character {
+                '"' => quote = None,
+                '\\' => {
+                    escaped = true;
+                    escaped_in_double_quotes = true;
+                }
+                _ => word.push(character),
+            },
+            _ => match character {
+                '\'' | '"' => {
+                    quote = Some(character);
+                    started = true;
+                }
+                '\\' => {
+                    escaped = true;
+                    escaped_in_double_quotes = false;
+                    started = true;
+                }
+                character if character.is_whitespace() => {
+                    if started {
+                        words.push(std::mem::take(&mut word));
+                        started = false;
+                    }
+                }
+                _ => {
+                    word.push(character);
+                    started = true;
+                }
+            },
+        }
+    }
+
+    if escaped {
+        return Err("line ends with an incomplete escape".to_owned());
+    }
+    if quote.is_some() {
+        return Err("line contains an unterminated quoted operand".to_owned());
+    }
+    if started {
+        words.push(word);
+    }
+
+    Ok(words)
 }
 
 fn check_app_shell(build_script: &str, service_worker: &str) -> Result<(), String> {
@@ -234,6 +341,29 @@ fn bare_dist_destination_is_joined_with_the_source_filename() {
     let service_worker = "const APP_SHELL = [\n  \"./index.html\",\n];";
 
     assert!(check_app_shell(build_script, service_worker).is_ok());
+}
+
+#[test]
+fn quoted_release_destinations_are_unquoted_before_checking() {
+    let build_script = r#"cp web/icons/icon-192.png "dist/extra-icon.png""#;
+    let service_worker = "const APP_SHELL = [\n  \"./index.html\",\n];";
+
+    let error = check_app_shell(build_script, service_worker).unwrap_err();
+    assert!(
+        error.contains("not cached by the service worker: extra-icon.png"),
+        "{error}"
+    );
+}
+
+#[test]
+fn raw_backslashes_in_app_shell_entries_are_rejected() {
+    let service_worker = r#"const APP_SHELL = [
+  "./index.html",
+  "./icons\icon-192.png",
+];"#;
+
+    let error = app_shell_assets(service_worker).unwrap_err();
+    assert!(error.contains("contains a backslash"), "{error}");
 }
 
 #[test]
