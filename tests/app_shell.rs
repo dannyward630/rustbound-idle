@@ -400,14 +400,20 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
             continue;
         }
 
-        if !line
+        let copy_line = line
+            .strip_prefix("command")
+            .filter(|rest| rest.chars().next().is_some_and(char::is_whitespace))
+            .map(str::trim_start)
+            .unwrap_or(line);
+
+        if !copy_line
             .strip_prefix("cp")
             .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
         {
             continue;
         }
 
-        let arguments = shell_words(line).map_err(|error| {
+        let arguments = shell_words(copy_line).map_err(|error| {
             format!("could not parse copy command on scripts/build.sh line {line_number}: {error}")
         })?;
         if arguments.len() < 2 {
@@ -644,15 +650,13 @@ fn service_worker_cache_matches_release_outputs() {
 
 #[test]
 fn missing_or_unshipped_app_shell_files_have_a_useful_error() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let build_script = fs::read_to_string(root.join("scripts/build.sh")).unwrap();
-    let service_worker = fs::read_to_string(root.join(SERVICE_WORKER_SOURCE)).unwrap();
-    let service_worker = service_worker.replace("\"./styles.css\",", "").replace(
-        "\"./icons/icon-512.png\",",
-        "\"./icons/icon-512.png\",\n  \"./missing.css\",",
-    );
+    let build_script = "cp web/index.html dist/\ncp web/styles.css dist/";
+    let service_worker = r#"const APP_SHELL = [
+  "./index.html",
+  "./missing.css",
+];"#;
 
-    let error = check_app_shell(&build_script, &service_worker).unwrap_err();
+    let error = check_app_shell(build_script, service_worker).unwrap_err();
     assert!(
         error.contains("not cached by the service worker: styles.css"),
         "{error}"
@@ -662,7 +666,6 @@ fn missing_or_unshipped_app_shell_files_have_a_useful_error() {
         "{error}"
     );
 }
-
 #[test]
 fn duplicate_root_urls_are_rejected() {
     for service_worker in [
@@ -786,6 +789,13 @@ fn bare_dist_destination_is_joined_with_the_source_filename() {
 }
 
 #[test]
+fn command_builtin_invocation_tracks_release_copies() {
+    let assets = release_assets("command cp web/icons/icon-192.png dist/extra-icon.png").unwrap();
+
+    assert_eq!(assets, BTreeSet::from(["extra-icon.png".to_owned()]));
+}
+
+#[test]
 fn quoted_release_destinations_are_unquoted_before_checking() {
     let build_script = r#"cp web/icons/icon-192.png "dist/extra-icon.png""#;
     let service_worker = "const APP_SHELL = [\n  \"./index.html\",\n];";
@@ -901,3 +911,4 @@ fn multiple_sources_make_a_nested_destination_a_directory() {
         BTreeSet::from(["icons/icon-a.png".to_owned(), "icons/icon-b.png".to_owned()])
     );
 }
+
