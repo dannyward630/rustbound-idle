@@ -54,6 +54,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test -j 2 --all-targets
 ```
 
+The Rust test suite also checks that web/sw.js caches the files copied into
+dist by scripts/build.sh. Run cargo test -j 2 --all-targets to check for drift.
+
 If you changed browser code, build and serve the release, then run both browser checks:
 
 ```bash
