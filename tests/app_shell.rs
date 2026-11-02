@@ -901,4 +901,3 @@ fn multiple_sources_make_a_nested_destination_a_directory() {
         BTreeSet::from(["icons/icon-a.png".to_owned(), "icons/icon-b.png".to_owned()])
     );
 }
-
