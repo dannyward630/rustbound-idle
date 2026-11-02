@@ -6,7 +6,7 @@ const SERVICE_WORKER_SOURCE: &str = "web/sw.js";
 
 fn normalize_shell_path(path: &str) -> Result<Option<String>, String> {
     if path == "./" || path == "." {
-        // The root URL resolves to index.html, which is listed explicitly.
+        // The root URL resolves to index.html; require that file to be listed explicitly below.
         return Ok(None);
     }
 
@@ -67,7 +67,7 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
     let mut assets = BTreeSet::new();
 
     for (line_number, line) in build_script.lines().enumerate() {
-        let line = line.trim();
+        let line = strip_shell_comment(line).trim();
         let Some(copy_command) = line.strip_prefix("cp ") else {
             continue;
         };
@@ -97,7 +97,7 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
                     .file_name()
                     .and_then(|name| name.to_str())
                     .ok_or_else(|| format!("could not read filename from build source {source}"))?;
-                format!("{destination}{filename}")
+                format!("{}/{filename}", destination.trim_end_matches('/'))
             } else {
                 destination.to_owned()
             };
@@ -117,6 +117,45 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
     }
 
     Ok(assets)
+}
+
+fn strip_shell_comment(line: &str) -> &str {
+    let mut quote = None;
+    let mut escaped = false;
+
+    for (index, character) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if character == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+
+        match character {
+            '\'' | '"' => quote = Some(character),
+            '#' if index == 0
+                || line[..index]
+                    .chars()
+                    .next_back()
+                    .is_some_and(char::is_whitespace) =>
+            {
+                return &line[..index];
+            }
+            _ => {}
+        }
+    }
+
+    line
 }
 
 fn check_app_shell(build_script: &str, service_worker: &str) -> Result<(), String> {
@@ -175,4 +214,33 @@ fn missing_or_unshipped_app_shell_files_have_a_useful_error() {
         error.contains("listed in APP_SHELL but not shipped in dist: missing.css"),
         "{error}"
     );
+}
+
+#[test]
+fn trailing_shell_comments_do_not_hide_copied_files() {
+    let build_script = "cp web/icons/icon-192.png dist/extra-icon.png # publish extra icon";
+    let service_worker = "const APP_SHELL = [\n  \"./index.html\",\n];";
+
+    let error = check_app_shell(build_script, service_worker).unwrap_err();
+    assert!(
+        error.contains("not cached by the service worker: extra-icon.png"),
+        "{error}"
+    );
+}
+
+#[test]
+fn bare_dist_destination_is_joined_with_the_source_filename() {
+    let build_script = "cp web/index.html dist";
+    let service_worker = "const APP_SHELL = [\n  \"./index.html\",\n];";
+
+    assert!(check_app_shell(build_script, service_worker).is_ok());
+}
+
+#[test]
+fn root_url_entry_is_covered_by_an_explicit_index_file_entry() {
+    let build_script = "cp web/index.html dist/";
+    let service_worker = "const APP_SHELL = [\n  \"./\",\n  \"./index.html\",\n];";
+
+    assert!(check_app_shell(build_script, service_worker).is_ok());
+    assert!(check_app_shell(build_script, "const APP_SHELL = [\n  \"./\",\n];").is_err());
 }
