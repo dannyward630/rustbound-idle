@@ -56,6 +56,10 @@ cargo test -j 2 --all-targets
 
 The Rust test suite also checks that web/sw.js caches the files copied into
 dist by scripts/build.sh. Run cargo test -j 2 --all-targets to check for drift.
+The checker accepts the build script's fixed setup and plain copies from web/ into
+dist/, dist/icons/, and dist/pkg/. If the build commands change, update the checker
+to understand the new form; unsupported commands fail the test.
+It also expects a literal APP_SHELL array and a simple service-worker preamble.
 
 If you changed browser code, build and serve the release, then run both browser checks:
 
