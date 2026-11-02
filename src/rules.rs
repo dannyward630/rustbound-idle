@@ -101,6 +101,14 @@ mod tests {
     }
 
     #[test]
+    fn click_upgrade_bonus_scales_and_saturates() {
+        assert_eq!(click_upgrade_bonus(0), 0);
+        assert_eq!(click_upgrade_bonus(4), 8);
+        // Doubling the maximum count must saturate instead of wrapping.
+        assert_eq!(click_upgrade_bonus(u32::MAX), u32::MAX);
+    }
+
+    #[test]
     fn upgrades_cost_more_each_time() {
         assert_eq!(click_upgrade_cost(0), 10);
         assert_eq!(click_upgrade_cost(1), 20);
