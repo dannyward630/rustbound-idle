@@ -69,6 +69,8 @@ mod tests {
     fn later_stages_have_tougher_enemies() {
         assert_eq!(enemy_health_for_stage(1), 20);
         assert_eq!(enemy_health_for_stage(2), 30);
+        // saturating_mul/add keep extreme stages from overflowing u32.
+        assert_eq!(enemy_health_for_stage(u32::MAX), u32::MAX);
     }
 
     #[test]
@@ -83,6 +85,7 @@ mod tests {
     fn levels_need_more_xp_as_they_go() {
         assert_eq!(xp_to_next_level(1), 20);
         assert_eq!(xp_to_next_level(2), 35);
+        assert_eq!(xp_to_next_level(3), 50);
     }
 
     #[test]
