@@ -63,15 +63,147 @@ fn normalize_source_path(path: &str) -> String {
     }
 }
 
+fn strip_javascript_comments(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut result = String::with_capacity(source.len());
+    let mut index = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut line_comment = false;
+    let mut block_comment = false;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let char_len = source[index..]
+            .chars()
+            .next()
+            .expect("index remains on a character boundary")
+            .len_utf8();
+
+        if line_comment {
+            if byte == b'\n' {
+                result.push('\n');
+                line_comment = false;
+            } else {
+                result.push(' ');
+            }
+            index += char_len;
+            continue;
+        }
+
+        if block_comment {
+            if byte == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                result.push_str("  ");
+                index += 2;
+                block_comment = false;
+            } else {
+                if byte == b'\n' {
+                    result.push('\n');
+                } else {
+                    result.push(' ');
+                }
+                index += char_len;
+            }
+            continue;
+        }
+
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == delimiter {
+                quote = None;
+            }
+            result.push_str(&source[index..index + char_len]);
+            index += char_len;
+            continue;
+        }
+
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            result.push_str("  ");
+            index += 2;
+            line_comment = true;
+            continue;
+        }
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            result.push_str("  ");
+            index += 2;
+            block_comment = true;
+            continue;
+        }
+        if matches!(byte, 0x27 | 0x22 | 0x60) {
+            quote = Some(byte);
+        }
+
+        result.push_str(&source[index..index + char_len]);
+        index += char_len;
+    }
+
+    result
+}
+
+fn javascript_code_marker_positions(source: &str, marker: &str) -> Vec<usize> {
+    let bytes = source.as_bytes();
+    let mut positions = Vec::new();
+    let mut index = 0;
+    let mut quote = None;
+    let mut escaped = false;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let char_len = source[index..]
+            .chars()
+            .next()
+            .expect("index remains on a character boundary")
+            .len_utf8();
+
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == delimiter {
+                quote = None;
+            }
+            index += char_len;
+            continue;
+        }
+
+        if matches!(byte, 0x27 | 0x22 | 0x60) {
+            quote = Some(byte);
+            index += char_len;
+            continue;
+        }
+
+        if source[index..].starts_with(marker) {
+            positions.push(index);
+            index += marker.len();
+        } else {
+            index += char_len;
+        }
+    }
+
+    positions
+}
+
 fn app_shell_assets(source: &str) -> Result<BTreeSet<String>, String> {
+    let source = strip_javascript_comments(source);
     let marker = "const APP_SHELL = [";
-    let start = source
-        .find(marker)
-        .ok_or_else(|| "could not find const APP_SHELL in web/sw.js".to_owned())?
-        + marker.len();
+    let declarations = javascript_code_marker_positions(&source, marker);
+    let start = match declarations.as_slice() {
+        [] => return Err("could not find const APP_SHELL in web/sw.js".to_owned()),
+        [start] => start + marker.len(),
+        _ => {
+            return Err(
+                "found multiple active const APP_SHELL declarations in web/sw.js".to_owned(),
+            );
+        }
+    };
     let contents = &source[start..];
-    let end = contents
-        .find("];")
+    let end = javascript_code_marker_positions(contents, "];")
+        .first()
+        .copied()
         .ok_or_else(|| "could not find the end of APP_SHELL in web/sw.js".to_owned())?;
 
     let mut assets = BTreeSet::new();
@@ -118,7 +250,6 @@ fn app_shell_assets(source: &str) -> Result<BTreeSet<String>, String> {
 
     Ok(assets)
 }
-
 fn contains_shell_expansion(operand: &str) -> bool {
     operand
         .chars()
@@ -148,7 +279,7 @@ fn record_created_directory(directories: &mut BTreeSet<String>, path: &str, crea
 }
 
 fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
-    let mut assets = BTreeSet::new();
+    let mut assets: BTreeSet<String> = BTreeSet::new();
     let mut created_directories = BTreeSet::new();
 
     for (line_number, line) in build_script.lines().enumerate() {
@@ -208,6 +339,7 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
                 )
             })?;
             let mut parse_options = true;
+            let mut recursive = false;
             let mut paths = Vec::new();
 
             for operand in arguments.iter().skip(1) {
@@ -219,7 +351,7 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
                         "-r" | "-f" | "-rf" | "-fr" | "--recursive" | "--force"
                     )
                 {
-                    continue;
+                    recursive |= matches!(operand.as_str(), "-r" | "-rf" | "-fr" | "--recursive");
                 } else if parse_options && operand.starts_with('-') {
                     return Err(format!(
                         "rm command on scripts/build.sh line {line_number} uses unsupported option {operand}"
@@ -241,11 +373,28 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
             }
             for path in paths {
                 if path == "dist" {
-                    created_directories.clear();
-                } else if path.starts_with("dist/") {
-                    created_directories.retain(|directory| {
-                        directory != &path && !directory.starts_with(&format!("{path}/"))
-                    });
+                    if recursive {
+                        assets.clear();
+                        created_directories.clear();
+                    }
+                } else if let Some(relative) = path.strip_prefix("dist/") {
+                    if recursive {
+                        let output_prefix = format!("{path}/");
+                        assets.retain(|asset| {
+                            asset != relative && !asset.starts_with(&format!("{relative}/"))
+                        });
+                        created_directories.retain(|directory| {
+                            directory != &path && !directory.starts_with(&output_prefix)
+                        });
+                    } else {
+                        assets.remove(relative);
+                        if !assets
+                            .iter()
+                            .any(|asset| asset.starts_with(&format!("{relative}/")))
+                        {
+                            created_directories.remove(&path);
+                        }
+                    }
                 }
             }
             continue;
@@ -526,6 +675,56 @@ fn duplicate_root_urls_are_rejected() {
 }
 
 #[test]
+fn removed_single_release_files_are_not_reported_as_shipped() {
+    let build_script = "cp web/index.html dist/\ncp web/styles.css dist/\nrm dist/styles.css";
+    let service_worker = "const APP_SHELL = [\n  \"./index.html\",\n  \"./styles.css\",\n];";
+
+    let error = check_app_shell(build_script, service_worker).unwrap_err();
+    assert!(
+        error.contains("listed in APP_SHELL but not shipped in dist: styles.css"),
+        "{error}"
+    );
+}
+
+#[test]
+fn recursively_removed_release_files_are_not_reported_as_shipped() {
+    let build_script = "cp web/index.html dist/\nmkdir -p dist/icons\ncp web/icons/icon-192.png dist/icons/\nrm -rf dist/icons";
+    let service_worker =
+        "const APP_SHELL = [\n  \"./index.html\",\n  \"./icons/icon-192.png\",\n];";
+
+    let error = check_app_shell(build_script, service_worker).unwrap_err();
+    assert!(
+        error.contains("listed in APP_SHELL but not shipped in dist: icons/icon-192.png"),
+        "{error}"
+    );
+}
+
+#[test]
+fn commented_out_app_shell_declarations_do_not_hide_the_active_array() {
+    let build_script = "cp web/index.html dist/\ncp web/styles.css dist/";
+    let service_worker = r#"/*
+const APP_SHELL = [
+  "./index.html",
+  "./styles.css",
+];
+*/
+const APP_SHELL = [
+  "./index.html",
+  "./missing.css",
+];"#;
+
+    let error = check_app_shell(build_script, service_worker).unwrap_err();
+    assert!(
+        error.contains("not cached by the service worker: styles.css"),
+        "{error}"
+    );
+    assert!(
+        error.contains("listed in APP_SHELL but not shipped in dist: missing.css"),
+        "{error}"
+    );
+}
+
+#[test]
 fn app_shell_paths_with_url_fragments_are_rejected() {
     let error =
         app_shell_assets("const APP_SHELL = [\n  \"./index.html\",\n  \"./extra#icon.png\",\n];")
@@ -702,3 +901,4 @@ fn multiple_sources_make_a_nested_destination_a_directory() {
         BTreeSet::from(["icons/icon-a.png".to_owned(), "icons/icon-b.png".to_owned()])
     );
 }
+
