@@ -251,9 +251,10 @@ fn app_shell_assets(source: &str) -> Result<BTreeSet<String>, String> {
     Ok(assets)
 }
 fn contains_shell_expansion(operand: &str) -> bool {
-    operand
-        .chars()
-        .any(|character| matches!(character, '$' | '\x60' | '*' | '?' | '[' | ']' | '{' | '}'))
+    operand.starts_with('~')
+        || operand
+            .chars()
+            .any(|character| matches!(character, '$' | '\x60' | '*' | '?' | '[' | ']' | '{' | '}'))
 }
 
 fn resolve_build_path(current_directory: &str, path: &str) -> String {
@@ -772,6 +773,32 @@ fn brace_expansion_in_release_paths_is_rejected() {
         release_assets("cp web/index.html dist/\nrm dist/{index.html,styles.css}").unwrap_err();
 
     assert!(error.contains("uses shell expansion"), "{error}");
+}
+
+#[test]
+fn tilde_expansion_in_release_paths_is_rejected() {
+    for (command, expected) in [
+        (
+            "cp web/icons/icon-192.png ~+/dist/extra-icon.png",
+            "uses shell expansion",
+        ),
+        ("cp ~/icon.png dist/icon.png", "uses shell expansion"),
+        ("mkdir ~+/dist/icons", "uses shell expansion"),
+        ("rm ~+/dist/styles.css", "uses shell expansion"),
+        ("cd ~+", "directory that cannot be checked safely"),
+    ] {
+        let error = release_assets(command).unwrap_err();
+        assert!(error.contains(expected), "{command}: {error}");
+    }
+}
+
+#[test]
+fn unsupported_directory_history_and_control_flow_are_rejected() {
+    let error = release_assets("cd dist\ncd -\nrm dist/styles.css").unwrap_err();
+    assert!(error.contains("uses cd -"), "{error}");
+
+    let error = release_assets("if false; then\ncp web/styles.css dist/\nfi").unwrap_err();
+    assert!(error.contains("unsupported build command"), "{error}");
 }
 
 #[test]
