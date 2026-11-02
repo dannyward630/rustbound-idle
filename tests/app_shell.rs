@@ -253,7 +253,15 @@ fn app_shell_assets(source: &str) -> Result<BTreeSet<String>, String> {
 fn contains_shell_expansion(operand: &str) -> bool {
     operand
         .chars()
-        .any(|character| matches!(character, '$' | '\x60' | '*' | '?' | '[' | ']'))
+        .any(|character| matches!(character, '$' | '\x60' | '*' | '?' | '[' | ']' | '{' | '}'))
+}
+
+fn resolve_build_path(current_directory: &str, path: &str) -> String {
+    if path.starts_with('/') || current_directory.is_empty() {
+        normalize_source_path(path)
+    } else {
+        normalize_source_path(&format!("{current_directory}/{path}"))
+    }
 }
 
 fn record_created_directory(directories: &mut BTreeSet<String>, path: &str, create_parents: bool) {
@@ -281,20 +289,59 @@ fn record_created_directory(directories: &mut BTreeSet<String>, path: &str, crea
 fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
     let mut assets: BTreeSet<String> = BTreeSet::new();
     let mut created_directories = BTreeSet::new();
+    let mut current_directory = String::new();
 
     for (line_number, line) in build_script.lines().enumerate() {
         let line = strip_shell_comment(line).trim();
         let line_number = line_number + 1;
+        let first_word = line.split_whitespace().next().unwrap_or_default();
+        let command_offset = usize::from(first_word == "command");
+        let command = if command_offset == 0 {
+            first_word
+        } else {
+            line.split_whitespace().nth(1).unwrap_or_default()
+        };
 
-        if line
-            .strip_prefix("mkdir")
-            .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
-        {
-            let arguments = shell_words(line).map_err(|error| {
-                format!(
-                    "could not parse mkdir command on scripts/build.sh line {line_number}: {error}"
-                )
-            })?;
+        if !matches!(command, "cd" | "mkdir" | "rm" | "cp") {
+            continue;
+        }
+
+        let arguments = shell_words(line).map_err(|error| {
+            format!(
+                "could not parse {command} command on scripts/build.sh line {line_number}: {error}"
+            )
+        })?;
+        let arguments = arguments.get(command_offset..).unwrap_or_default();
+
+        if command == "cd" {
+            if arguments.len() != 2 {
+                return Err(format!(
+                    "cd command on scripts/build.sh line {line_number} must have exactly one directory"
+                ));
+            }
+
+            let directory = &arguments[1];
+            if directory == "$ROOT_DIR" {
+                current_directory.clear();
+                continue;
+            }
+            if contains_shell_expansion(directory) || directory.starts_with('/') {
+                return Err(format!(
+                    "cd command on scripts/build.sh line {line_number} uses a directory that cannot be checked safely"
+                ));
+            }
+
+            let directory = resolve_build_path(&current_directory, directory);
+            if directory == ".." || directory.starts_with("../") {
+                return Err(format!(
+                    "cd command on scripts/build.sh line {line_number} leaves the repository root"
+                ));
+            }
+            current_directory = directory;
+            continue;
+        }
+
+        if command == "mkdir" {
             let mut create_parents = false;
             let mut parse_options = true;
             let mut paths = Vec::new();
@@ -324,20 +371,13 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
                 ));
             }
             for path in paths {
-                record_created_directory(&mut created_directories, path, create_parents);
+                let path = resolve_build_path(&current_directory, path);
+                record_created_directory(&mut created_directories, &path, create_parents);
             }
             continue;
         }
 
-        if line
-            .strip_prefix("rm")
-            .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
-        {
-            let arguments = shell_words(line).map_err(|error| {
-                format!(
-                    "could not parse rm command on scripts/build.sh line {line_number}: {error}"
-                )
-            })?;
+        if command == "rm" {
             let mut parse_options = true;
             let mut recursive = false;
             let mut paths = Vec::new();
@@ -362,7 +402,7 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
                             "rm command on scripts/build.sh line {line_number} uses shell expansion that cannot be checked safely"
                         ));
                     }
-                    paths.push(normalize_source_path(operand));
+                    paths.push(resolve_build_path(&current_directory, operand));
                 }
             }
 
@@ -400,22 +440,6 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
             continue;
         }
 
-        let copy_line = line
-            .strip_prefix("command")
-            .filter(|rest| rest.chars().next().is_some_and(char::is_whitespace))
-            .map(str::trim_start)
-            .unwrap_or(line);
-
-        if !copy_line
-            .strip_prefix("cp")
-            .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
-        {
-            continue;
-        }
-
-        let arguments = shell_words(copy_line).map_err(|error| {
-            format!("could not parse copy command on scripts/build.sh line {line_number}: {error}")
-        })?;
         if arguments.len() < 2 {
             return Err(format!(
                 "copy command on scripts/build.sh line {line_number} has no destination"
@@ -439,7 +463,7 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
 
         let raw_destination = arguments.last().expect("at least two arguments");
         let destination_has_trailing_slash = raw_destination.ends_with('/');
-        let destination = normalize_source_path(raw_destination);
+        let destination = resolve_build_path(&current_directory, raw_destination);
         if destination != "dist" && !destination.starts_with("dist/") {
             continue;
         }
@@ -456,13 +480,14 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
             || destination_has_trailing_slash
             || created_directories.contains(&destination);
         for source in sources {
-            if normalize_source_path(source) == SERVICE_WORKER_SOURCE {
+            let source = resolve_build_path(&current_directory, source);
+            if source == SERVICE_WORKER_SOURCE {
                 // A service worker is installed by the browser and does not precache itself.
                 continue;
             }
 
             let output = if destination_is_directory {
-                let filename = Path::new(source)
+                let filename = Path::new(&source)
                     .file_name()
                     .and_then(|name| name.to_str())
                     .ok_or_else(|| format!("could not read filename from build source {source}"))?;
@@ -687,6 +712,39 @@ fn removed_single_release_files_are_not_reported_as_shipped() {
         error.contains("listed in APP_SHELL but not shipped in dist: styles.css"),
         "{error}"
     );
+}
+
+#[test]
+fn command_builtin_removals_are_applied_to_release_assets() {
+    let build_script =
+        "cp web/index.html dist/\ncp web/styles.css dist/\ncommand rm dist/styles.css";
+    let service_worker = "const APP_SHELL = [\n  \"./index.html\",\n  \"./styles.css\",\n];";
+
+    let error = check_app_shell(build_script, service_worker).unwrap_err();
+    assert!(
+        error.contains("listed in APP_SHELL but not shipped in dist: styles.css"),
+        "{error}"
+    );
+}
+
+#[test]
+fn release_paths_follow_working_directory_changes() {
+    let build_script = "cp web/index.html dist/\ncp web/styles.css dist/\ncd dist\nrm styles.css";
+    let service_worker = "const APP_SHELL = [\n  \"./index.html\",\n  \"./styles.css\",\n];";
+
+    let error = check_app_shell(build_script, service_worker).unwrap_err();
+    assert!(
+        error.contains("listed in APP_SHELL but not shipped in dist: styles.css"),
+        "{error}"
+    );
+}
+
+#[test]
+fn brace_expansion_in_release_paths_is_rejected() {
+    let error =
+        release_assets("cp web/index.html dist/\nrm dist/{index.html,styles.css}").unwrap_err();
+
+    assert!(error.contains("uses shell expansion"), "{error}");
 }
 
 #[test]
