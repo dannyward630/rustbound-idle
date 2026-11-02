@@ -21,6 +21,11 @@ fn normalize_shell_path(path: &str) -> Result<Option<String>, String> {
             "APP_SHELL entry contains a backslash instead of a URL path separator: {path}"
         ));
     }
+    if path.split('/').any(has_percent_encoded_dot_segment) {
+        return Err(format!(
+            "APP_SHELL entry contains a percent-encoded dot segment that aliases a canonical URL path: {path}"
+        ));
+    }
     if path.starts_with('/') || path.split('/').any(|part| part == ".." || part.is_empty()) {
         return Err(format!(
             "APP_SHELL entry is not a relative file path: {path}"
@@ -28,6 +33,11 @@ fn normalize_shell_path(path: &str) -> Result<Option<String>, String> {
     }
 
     Ok(Some(path.to_owned()))
+}
+
+fn has_percent_encoded_dot_segment(segment: &str) -> bool {
+    let decoded = segment.to_ascii_lowercase().replace("%2e", ".");
+    decoded == "." || decoded == ".."
 }
 
 fn normalize_source_path(path: &str) -> String {
@@ -109,11 +119,138 @@ fn app_shell_assets(source: &str) -> Result<BTreeSet<String>, String> {
     Ok(assets)
 }
 
+fn contains_shell_expansion(operand: &str) -> bool {
+    operand
+        .chars()
+        .any(|character| matches!(character, '$' | '\x60' | '*' | '?' | '[' | ']'))
+}
+
+fn record_created_directory(directories: &mut BTreeSet<String>, path: &str, create_parents: bool) {
+    let path = normalize_source_path(path);
+    if path != "dist" && !path.starts_with("dist/") {
+        return;
+    }
+
+    if create_parents {
+        let mut prefix = String::new();
+        for component in path.split('/') {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(component);
+            if prefix == "dist" || prefix.starts_with("dist/") {
+                directories.insert(prefix.clone());
+            }
+        }
+    } else {
+        directories.insert(path);
+    }
+}
+
 fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
     let mut assets = BTreeSet::new();
+    let mut created_directories = BTreeSet::new();
 
     for (line_number, line) in build_script.lines().enumerate() {
         let line = strip_shell_comment(line).trim();
+        let line_number = line_number + 1;
+
+        if line
+            .strip_prefix("mkdir")
+            .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
+        {
+            let arguments = shell_words(line).map_err(|error| {
+                format!(
+                    "could not parse mkdir command on scripts/build.sh line {line_number}: {error}"
+                )
+            })?;
+            let mut create_parents = false;
+            let mut parse_options = true;
+            let mut paths = Vec::new();
+
+            for operand in arguments.iter().skip(1) {
+                if parse_options && operand == "--" {
+                    parse_options = false;
+                } else if parse_options && matches!(operand.as_str(), "-p" | "--parents") {
+                    create_parents = true;
+                } else if parse_options && operand.starts_with('-') {
+                    return Err(format!(
+                        "mkdir command on scripts/build.sh line {line_number} uses unsupported option {operand}"
+                    ));
+                } else {
+                    if contains_shell_expansion(operand) {
+                        return Err(format!(
+                            "mkdir command on scripts/build.sh line {line_number} uses shell expansion that cannot be checked safely"
+                        ));
+                    }
+                    paths.push(operand.as_str());
+                }
+            }
+
+            if paths.is_empty() {
+                return Err(format!(
+                    "mkdir command on scripts/build.sh line {line_number} has no directory"
+                ));
+            }
+            for path in paths {
+                record_created_directory(&mut created_directories, path, create_parents);
+            }
+            continue;
+        }
+
+        if line
+            .strip_prefix("rm")
+            .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
+        {
+            let arguments = shell_words(line).map_err(|error| {
+                format!(
+                    "could not parse rm command on scripts/build.sh line {line_number}: {error}"
+                )
+            })?;
+            let mut parse_options = true;
+            let mut paths = Vec::new();
+
+            for operand in arguments.iter().skip(1) {
+                if parse_options && operand == "--" {
+                    parse_options = false;
+                } else if parse_options
+                    && matches!(
+                        operand.as_str(),
+                        "-r" | "-f" | "-rf" | "-fr" | "--recursive" | "--force"
+                    )
+                {
+                    continue;
+                } else if parse_options && operand.starts_with('-') {
+                    return Err(format!(
+                        "rm command on scripts/build.sh line {line_number} uses unsupported option {operand}"
+                    ));
+                } else {
+                    if contains_shell_expansion(operand) {
+                        return Err(format!(
+                            "rm command on scripts/build.sh line {line_number} uses shell expansion that cannot be checked safely"
+                        ));
+                    }
+                    paths.push(normalize_source_path(operand));
+                }
+            }
+
+            if paths.is_empty() {
+                return Err(format!(
+                    "rm command on scripts/build.sh line {line_number} has no path"
+                ));
+            }
+            for path in paths {
+                if path == "dist" {
+                    created_directories.clear();
+                } else if path.starts_with("dist/") {
+                    created_directories.retain(|directory| {
+                        directory != &path && !directory.starts_with(&format!("{path}/"))
+                    });
+                }
+            }
+            continue;
+        }
+
         if !line
             .strip_prefix("cp")
             .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
@@ -122,40 +259,32 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
         }
 
         let arguments = shell_words(line).map_err(|error| {
-            format!(
-                "could not parse copy command on scripts/build.sh line {}: {error}",
-                line_number + 1
-            )
+            format!("could not parse copy command on scripts/build.sh line {line_number}: {error}")
         })?;
         if arguments.len() < 2 {
             return Err(format!(
-                "copy command on scripts/build.sh line {} has no destination",
-                line_number + 1
+                "copy command on scripts/build.sh line {line_number} has no destination"
             ));
         }
 
         let operands = &arguments[1..];
         if operands.is_empty() || operands.iter().any(|operand| operand.starts_with('-')) {
             return Err(format!(
-                "copy command on scripts/build.sh line {} uses unsupported cp options or has no source",
-                line_number + 1
+                "copy command on scripts/build.sh line {line_number} uses unsupported cp options or has no source"
             ));
         }
-        if operands.iter().any(|operand| {
-            operand
-                .chars()
-                .any(|character| matches!(character, '$' | '`' | '*' | '?' | '[' | ']'))
-        }) {
+        if operands
+            .iter()
+            .any(|operand| contains_shell_expansion(operand))
+        {
             return Err(format!(
-                "copy command on scripts/build.sh line {} uses shell expansion that cannot be checked safely",
-                line_number + 1
+                "copy command on scripts/build.sh line {line_number} uses shell expansion that cannot be checked safely"
             ));
         }
 
-        let destination = arguments
-            .last()
-            .expect("at least two arguments")
-            .trim_start_matches("./");
+        let raw_destination = arguments.last().expect("at least two arguments");
+        let destination_has_trailing_slash = raw_destination.ends_with('/');
+        let destination = normalize_source_path(raw_destination);
         if destination != "dist" && !destination.starts_with("dist/") {
             continue;
         }
@@ -163,13 +292,14 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
         let sources = &arguments[1..arguments.len() - 1];
         if sources.is_empty() {
             return Err(format!(
-                "copy command on scripts/build.sh line {} uses unsupported cp options or has no source",
-                line_number + 1
+                "copy command on scripts/build.sh line {line_number} uses unsupported cp options or has no source"
             ));
         }
 
-        let destination_is_directory =
-            sources.len() > 1 || destination == "dist" || destination.ends_with('/');
+        let destination_is_directory = sources.len() > 1
+            || destination == "dist"
+            || destination_has_trailing_slash
+            || created_directories.contains(&destination);
         for source in sources {
             if normalize_source_path(source) == SERVICE_WORKER_SOURCE {
                 // A service worker is installed by the browser and does not precache itself.
@@ -181,9 +311,9 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
                     .file_name()
                     .and_then(|name| name.to_str())
                     .ok_or_else(|| format!("could not read filename from build source {source}"))?;
-                format!("{}/{filename}", destination.trim_end_matches('/'))
+                format!("{destination}/{filename}")
             } else {
-                destination.to_owned()
+                destination.clone()
             };
 
             if output.contains('\\') {
@@ -405,6 +535,26 @@ fn app_shell_paths_with_url_fragments_are_rejected() {
 }
 
 #[test]
+fn percent_encoded_dot_segments_are_rejected() {
+    for path in [
+        "./%2e",
+        "./%2E",
+        "./.%2e",
+        "./%2e.",
+        "./%2e%2e",
+        "./%2E%2E",
+        "./icons/%2e/icon-192.png",
+    ] {
+        let service_worker = format!("const APP_SHELL = [\n  \"./index.html\",\n  \"{path}\",\n];");
+        let error = app_shell_assets(&service_worker).unwrap_err();
+        assert!(
+            error.contains("percent-encoded dot segment"),
+            "{path}: {error}"
+        );
+    }
+}
+
+#[test]
 fn dot_segments_are_normalized_before_exempting_the_service_worker() {
     let service_worker = "const APP_SHELL = [\n  \"./index.html\",\n];";
     for source in ["./web/sw.js", "././web/sw.js", "web/./sw.js"] {
@@ -512,6 +662,35 @@ fn root_url_entry_is_covered_by_an_explicit_index_file_entry() {
     assert!(check_app_shell(build_script, service_worker).is_ok());
     let error = app_shell_assets("const APP_SHELL = [\n  \"./\",\n];").unwrap_err();
     assert!(error.contains("does not list \"./index.html\""), "{error}");
+}
+
+#[test]
+fn single_source_copies_to_a_created_directory_keep_their_filenames() {
+    let build_script = "mkdir -p dist/icons\ncp web/icons/icon-192.png dist/icons\ncp web/icons/icon-512.png dist/icons";
+    let service_worker =
+        "const APP_SHELL = [\n  \"./icons/icon-192.png\",\n  \"./icons/icon-512.png\",\n];";
+
+    assert!(check_app_shell(build_script, service_worker).is_ok());
+
+    let worker_missing_second_icon = "const APP_SHELL = [\n  \"./icons/icon-192.png\",\n];";
+    let error = check_app_shell(build_script, worker_missing_second_icon).unwrap_err();
+    assert!(
+        error.contains("not cached by the service worker: icons/icon-512.png"),
+        "{error}"
+    );
+}
+
+#[test]
+fn removed_directories_are_not_used_to_classify_later_copy_destinations() {
+    let build_script =
+        "mkdir -p dist/icons\nrm -rf dist/icons\ncp web/icons/icon-192.png dist/icons";
+    let service_worker = "const APP_SHELL = [\n  \"./index.html\",\n];";
+
+    let error = check_app_shell(build_script, service_worker).unwrap_err();
+    assert!(
+        error.contains("not cached by the service worker: icons"),
+        "{error}"
+    );
 }
 
 #[test]
