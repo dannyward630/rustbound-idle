@@ -37,6 +37,7 @@ fn app_shell_assets(source: &str) -> Result<BTreeSet<String>, String> {
         .ok_or_else(|| "could not find the end of APP_SHELL in web/sw.js".to_owned())?;
 
     let mut assets = BTreeSet::new();
+    let mut has_root_url = false;
     for (line_number, line) in contents[..end].lines().enumerate() {
         let entry = line.trim();
         if entry.is_empty() {
@@ -54,11 +55,18 @@ fn app_shell_assets(source: &str) -> Result<BTreeSet<String>, String> {
                 )
             })?;
 
-        if let Some(path) = normalize_shell_path(path)?
-            && !assets.insert(path.clone())
-        {
-            return Err(format!("APP_SHELL lists {path} more than once"));
+        match normalize_shell_path(path)? {
+            Some(path) => {
+                if !assets.insert(path.clone()) {
+                    return Err(format!("APP_SHELL lists {path} more than once"));
+                }
+            }
+            None => has_root_url = true,
         }
+    }
+
+    if has_root_url && !assets.contains("index.html") {
+        return Err("APP_SHELL includes a root URL but does not list \"./index.html\"".to_owned());
     }
 
     if assets.is_empty() {
@@ -127,7 +135,8 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
             ));
         }
 
-        let destination_is_directory = destination == "dist" || destination.ends_with('/');
+        let destination_is_directory =
+            sources.len() > 1 || destination == "dist" || destination.ends_with('/');
         for source in sources {
             if *source == SERVICE_WORKER_SOURCE {
                 // A service worker is installed by the browser and does not precache itself.
@@ -436,5 +445,16 @@ fn root_url_entry_is_covered_by_an_explicit_index_file_entry() {
     let service_worker = "const APP_SHELL = [\n  \"./\",\n  \"./index.html\",\n];";
 
     assert!(check_app_shell(build_script, service_worker).is_ok());
-    assert!(check_app_shell(build_script, "const APP_SHELL = [\n  \"./\",\n];").is_err());
+    let error = app_shell_assets("const APP_SHELL = [\n  \"./\",\n];").unwrap_err();
+    assert!(error.contains("does not list \"./index.html\""), "{error}");
+}
+
+#[test]
+fn multiple_sources_make_a_nested_destination_a_directory() {
+    let assets = release_assets("cp web/icon-a.png web/icon-b.png dist/icons").unwrap();
+
+    assert_eq!(
+        assets,
+        BTreeSet::from(["icons/icon-a.png".to_owned(), "icons/icon-b.png".to_owned()])
+    );
 }
