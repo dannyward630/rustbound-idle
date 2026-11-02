@@ -93,13 +93,21 @@ fn release_assets(build_script: &str) -> Result<BTreeSet<String>, String> {
             ));
         }
 
+        let operands = &arguments[1..];
+        if operands.is_empty() || operands.iter().any(|operand| operand.starts_with('-')) {
+            return Err(format!(
+                "copy command on scripts/build.sh line {} uses unsupported cp options or has no source",
+                line_number + 1
+            ));
+        }
+
         let destination = arguments.last().expect("at least two arguments");
         if destination != "dist" && !destination.starts_with("dist/") {
             continue;
         }
 
         let sources = &arguments[1..arguments.len() - 1];
-        if sources.is_empty() || sources.iter().any(|source| source.starts_with('-')) {
+        if sources.is_empty() {
             return Err(format!(
                 "copy command on scripts/build.sh line {} uses unsupported cp options or has no source",
                 line_number + 1
@@ -353,6 +361,12 @@ fn quoted_release_destinations_are_unquoted_before_checking() {
         error.contains("not cached by the service worker: extra-icon.png"),
         "{error}"
     );
+}
+
+#[test]
+fn cp_target_directory_options_are_rejected_before_destination_filtering() {
+    let error = release_assets("cp -t dist web/icons/icon-192.png").unwrap_err();
+    assert!(error.contains("unsupported cp options"), "{error}");
 }
 
 #[test]
